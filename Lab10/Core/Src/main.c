@@ -23,6 +23,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "math.h"
+#include "stdio.h"
+#include <stdlib.h>
+#include "string.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,6 +54,34 @@ TIM_HandleTypeDef htim11;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+char TxDataBuffer[32] =
+{ 0 };
+char RxDataBuffer[32] =
+{ 0 };
+
+uint8_t STATE_Display = 0;
+enum _StateDisplay //enum �?ทนคำเป็นตัวเลข
+{
+  StateDisplay_MenuRoot_Print =0, //หน้า menu
+  StateDisplay_MenuRoot_WaitInput,
+  StateDisplay_MenuSawtooth,
+  StateDisplay_MenuSinewave,
+  StateDisplay_MenuSquarewave
+};
+
+float frequency = 1;
+int graph = 0; //default sawtooth
+float AngleInput =0; //rad
+float V_high = 2;
+float V_low = 0;
+uint16_t V_high_ADC = 0;
+uint16_t V_low_ADC = 0;
+uint16_t delta_Y =0;
+float T = 0;
+float t = 0;
+int slope = 1;
+float duty_cycle =0.5;
+
 uint16_t ADCin = 0;
 uint64_t _micro = 0;
 
@@ -68,13 +99,15 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_SPI3_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_SPI3_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM11_Init(void);
 /* USER CODE BEGIN PFP */
 void MCP4922SetOutput(uint8_t Config, uint16_t DACOutput);
 uint64_t micros();
+
+int16_t UARTRecieveIT();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -112,17 +145,23 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_USART2_UART_Init();
-  MX_SPI3_Init();
   MX_ADC1_Init();
+  MX_SPI3_Init();
   MX_TIM3_Init();
   MX_TIM11_Init();
   /* USER CODE BEGIN 2 */
+
+  	  {
+    	  char temp[]="HELLO WORLD\r\n please type something to START UART\r\n";
+    	  HAL_UART_Transmit(&huart2, (uint8_t*) temp, strlen(temp), 1000); //polling
+     }
+
 	HAL_TIM_Base_Start(&htim3);
 	HAL_TIM_Base_Start_IT(&htim11);
 	HAL_ADC_Start_DMA(&hadc1, (uint32_t*) &ADCin, 1);
 
 	//low = เผื่อให้ output a ทำงานช่องเดียว
-	// A&B update พร้อมกันต่อ high
+	// A&B update พร้อม�?ันต่อ high
 	HAL_GPIO_WritePin(LOAD_GPIO_Port, LOAD_Pin, GPIO_PIN_RESET);
   /* USER CODE END 2 */
 
@@ -130,24 +169,588 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 	while (1)
 	{
-		static uint64_t timestamp = 0;
-		if (micros() - timestamp >= 100) //10k Hz
-		{
-			timestamp = micros();
+				static uint64_t timestamp = 0;
+				if (micros() - timestamp >= 10000) //10k Hz
+				{
+					timestamp = micros();
 
-			//saw tooth
-			dataOut++; //output เปลี่ยนค่าเรื่อย ๆ
-			dataOut %= 4096; //12 bits
+					if (graph ==0) //sawtooth
+					{
+						if (slope>0)
+						{
+//							dataOut++; //output เปลี่ยนค่าเรื่อย ๆ
+//							dataOut %= 4096; //12 bits
+							V_high_ADC = 4096*V_high/3.3;
+							V_low_ADC = 4096*V_low/3.3;
+							t +=0.01;
+							T = 1/frequency;
+							if (t <= T)
+							{
+								delta_Y = V_high_ADC - V_low_ADC;
+								dataOut = ((V_high_ADC-V_low_ADC)/T)*t+V_low_ADC;
+								//dataOut %= delta_Y;
+							}
+							else
+							{
+								t=0;
+							}
 
-			//ไม่ได้คุยกับ slave ตัวอื่น
-			if (hspi3.State == HAL_SPI_STATE_READY
-					&& HAL_GPIO_ReadPin(SPI_SS_GPIO_Port, SPI_SS_Pin)
-							== GPIO_PIN_SET)
-			{
-				//ส่งข้อมูล
-				MCP4922SetOutput(DACConfig, dataOut);
-			}
-		}
+						}
+						else
+						{
+//							dataOut--; //output เปลี่ยนค่าเรื่อย ๆ
+//							dataOut %= 4096; //12 bits
+							V_high_ADC = 4096*V_high/3.3;
+							V_low_ADC = 4096*V_low/3.3;
+							t +=0.01;
+							T = 1/frequency;
+							if (t <= T)
+							{
+								delta_Y = V_high_ADC - V_low_ADC;
+								dataOut = ((V_low_ADC-V_high_ADC)/T)*t+V_high_ADC;
+							}
+							else
+							{
+								t=0;
+							}
+						}
+
+					}
+					else if (graph ==1) //sine wave
+					{
+						AngleInput += 0.001;
+						V_high_ADC = 4096*V_high/3.3;
+						V_low_ADC = 4096*V_low/3.3;
+						dataOut = ((V_high_ADC-V_low_ADC)/2*sin(2*M_PI*frequency*AngleInput))+((V_high_ADC+V_low_ADC)/2);
+					}
+					else //square wave
+					{
+						t+=0.01;
+						T = 1/frequency;
+						float T_on = T*duty_cycle;
+						float T_off = T*duty_cycle;
+						V_high_ADC = 4096*V_high/3.3;
+						V_low_ADC = 4096*V_low/3.3;
+						if (t<= T_on && t <= T_off)
+						{
+							dataOut = V_high_ADC;
+						}
+						else if (t >T_off && t<=T)
+						{
+							dataOut = V_low_ADC;
+						}
+						else if (t>T)
+						{
+							t=0;
+						}
+
+					}
+
+					//ไม่ได้คุย�?ับ slave ตัวอื่น
+					if (hspi3.State == HAL_SPI_STATE_READY
+							&& HAL_GPIO_ReadPin(SPI_SS_GPIO_Port, SPI_SS_Pin)
+									== GPIO_PIN_SET)
+					{
+						//ส่งข้อมูล
+						MCP4922SetOutput(DACConfig, dataOut);
+					}
+				}
+
+			  HAL_UART_Receive_IT(&huart2,  (uint8_t*)RxDataBuffer, 32);
+			  int16_t inputchar = UARTRecieveIT();
+			  if(inputchar!=-1)
+			  {
+				  sprintf(TxDataBuffer, "ReceivedChar:[%c]\r\n", inputchar);
+			  	  HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  switch(STATE_Display)
+			  		{
+			  	  	  case StateDisplay_MenuRoot_Print:
+						  {
+							  char temp1[]="\n"
+									  "************\r\n"
+									  "   Menu   \r\n"
+									  "************\r\n"
+									  "Menu 0: Sawtooth\r\n"
+									  "Menu 1: Sine wave\r\n"
+									  "Menu 2: Square wave\r\n"
+									  "************\r\n"
+									  "\n";
+							  HAL_UART_Transmit(&huart2, (uint8_t*) temp1, strlen(temp1), 1000);
+						  }
+			  	  		  STATE_Display = StateDisplay_MenuRoot_WaitInput;
+			  	  		  break;
+
+			  	  	  case StateDisplay_MenuRoot_WaitInput:
+			  	  		  switch (inputchar)
+			  	  		  {
+
+			  	  		  	  case '0':
+			  	  		  		  graph = 0;
+			  	  		  		  	 char temp1[]="\n"
+			  	  		  							"************\r\n"
+			  	  		  							"   Sawtooth   \r\n"
+			  	  		  							"************\r\n"
+			  	  		  		  			 	 	"Menu a: Frequency +0.1\r\n"
+			  	  		  		  					"Menu s: Frequency -0.1\r\n"
+			  	  		  		  					"Menu d: V High +0.1\r\n"
+			  	  		  		  					"Menu f: V High -0.1\r\n"
+			  	  		  		  					"Menu g: V Low +0.1\r\n"
+			  	  		  		  					"Menu h: V Low -0.1\r\n"
+			  	  		  		  					"Menu j: Slope up \r\n"
+			  	  		  		  					"Menu k: Slope down\r\n"
+			  	  		  		  			 	 	 "************\r\n"
+			  	  		  		  			  	  	"x:Back\r\n"
+			  	  		  							"\n";
+			  	  		  		  HAL_UART_Transmit(&huart2, (uint8_t*) temp1, strlen(temp1), 1000);
+			  	  		  		  STATE_Display = StateDisplay_MenuSawtooth;
+			  	  		  		  break;
+
+			  	  		  	  case '1':
+			  	  		  		graph = 1;
+			  	  		  		char temp2[]="\n"
+			  	  		  				  	  	"************\r\n"
+			  	  		  				  	  	"   Sine wave   \r\n"
+			  	  		  				  	  	"************\r\n"
+			  	  		  						"Menu a: Frequency +0.1\r\n"
+			  	  		  						"Menu s: Frequency -0.1\r\n"
+			  	  		  						"Menu d: V High +0.1\r\n"
+			  	  		  						"Menu f: V High -0.1\r\n"
+			  	  		  						"Menu g: V Low +0.1\r\n"
+			  	  		  						"Menu h: V Low -0.1\r\n"
+			  	  		  						"************\r\n"
+			  	  		  				  	  	"x:Back\r\n"
+			  	  		  				  	  	"\n";
+			  	  		  		HAL_UART_Transmit(&huart2, (uint8_t*) temp2, strlen(temp2), 1000);
+			  	  		  		  STATE_Display = StateDisplay_MenuSinewave;
+			  	  		  		  break;
+
+			  	  		  	  case '2':
+			  	  		  			graph = 2;
+			  	  		  			char temp3[]="\n"
+			  	  		  							"************\r\n"
+			  	  		  					  	  	"   Square wave   \r\n"
+			  	  		  					  	  	"************\r\n"
+			  	  		  					  	  	"Menu a: Frequency +0.1\r\n"
+			  	  		  					  	  	"Menu s: Frequency -0.1\r\n"
+			  	  		  					  	  	"Menu d: V High +0.1\r\n"
+			  	  		  					  	  	"Menu f: V High -0.1\r\n"
+			  	  		  					  	  	"Menu g: V Low +0.1\r\n"
+			  	  		  					  	  	"Menu h: V Low -0.1\r\n"
+			  	  		  					  	  	"Menu w: Duty cycle +10%\r\n"
+			  	  		  					  	  	"Menu e: Duty cycle -10%\r\n"
+			  	  		  							"************\r\n"
+			  	  		  					  	  	"x:Back\r\n"
+			  	  		  					  	  	"\n";
+			  	  		  		HAL_UART_Transmit(&huart2, (uint8_t*) temp3, strlen(temp3), 1000);
+			  	  		  		STATE_Display = StateDisplay_MenuSquarewave;
+			  	  		  		break;
+
+			  	  		  	  default:
+			  	  		  		  sprintf(TxDataBuffer,"unidentified input\r\n");
+			  	  		  		  HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  		  		  STATE_Display = StateDisplay_MenuRoot_WaitInput;
+			  	  		  		  break;
+			  	  		  }
+			  	  		  break;
+
+			  	  		  case StateDisplay_MenuSawtooth:
+			  	  			switch (inputchar)
+			  	  			{
+			  	  				case 'a':
+			  	  					if(frequency < 10)
+			  	  					{
+			  	  						frequency += 0.1;
+//			  	  					 	sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+//			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  					else
+			  	  					 {
+			  	  						sprintf(TxDataBuffer,"Frequency is limited\r\n");
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					 }
+			  	  					 STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					 break;
+
+			  	  				case 's':
+			  	  					  if (frequency > 0.1)
+			  	  					  {
+			  	  					  	  	frequency -= 0.1;
+			  	  			//			  	sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  			//			  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  else
+			  	  					  	{
+
+			  	  					  	  	sprintf(TxDataBuffer,"Frequency is limited\r\n");
+			  	  					  	  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  	}
+			  	  					  	STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					  	break;
+
+			  	  				case 'd':
+			  	  					if (V_high<3.3)
+			  	  					{
+			  	  						V_high += 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  						V_high = 3.3;
+			  	  					  	sprintf(TxDataBuffer,"V_high is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+
+			  	  			//		 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  			//		 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					 STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					 break;
+
+			  	  				case 'f':
+			  	  					if (V_high > V_low)
+			  	  					{
+			  	  						V_high -= 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_high is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  		//			  sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  		//			  HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					  break;
+
+			  	  				case 'g':
+			  	  					if (V_low <V_high)
+			  	  					{
+			  	  						V_low += 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_low is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  			//		 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  			//		 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					 STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					 break;
+
+			  	  				case 'h':
+			  	  					if (V_low>0)
+			  	  					{
+			  	  						V_low -= 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_low is limited\r\n");
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+
+			  	  			//			 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  			//			 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					  break;
+
+			  	  				case 'j':
+			  	  					slope = 1;
+			  	  					STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					break;
+
+			  	  				case 'k':
+			  	  					slope = -1;
+			  	  					STATE_Display = StateDisplay_MenuSawtooth;
+			  	  					break;
+
+			  	  				case 'x':
+			  	  					{
+			  	  						char temp4[]="\n"
+			  	  						  	  			"************\r\n"
+			  	  						  	  			"   Menu   \r\n"
+			  	  						  	  			"************\r\n"
+			  	  						  	  			"Menu 0: Sawtooth\r\n"
+			  	  						  	  			"Menu 1: Sine wave\r\n"
+			  	  						  	  			"Menu 2: Square wave\r\n"
+			  	  						  	  			"************\r\n"
+			  	  						  	  			"\n";
+			  	  						  HAL_UART_Transmit(&huart2, (uint8_t*) temp4, strlen(temp4), 1000);
+			  	  					}
+			  	  					STATE_Display = StateDisplay_MenuRoot_WaitInput;
+			  	  					break;
+
+			  	  				default:
+			  	  						sprintf(TxDataBuffer,"unidentified input\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						STATE_Display = StateDisplay_MenuSawtooth;
+			  	  						break;
+			  	  			}
+			  	  			  break;
+
+			  	  		  case StateDisplay_MenuSinewave:
+			  	  			switch (inputchar)
+			  	  			{
+			  	  				case 'a':
+			  	  					 if(frequency < 10)
+			  	  					 {
+			  	  					 	frequency += 0.1;
+			  	  		//			 	sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  		//			  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  else
+			  	  					  {
+			  	  						  sprintf(TxDataBuffer,"Frequency is limited\r\n");
+			  	  					  	  HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  STATE_Display = StateDisplay_MenuSinewave;
+			  	  					  break;
+
+			  	  				 case 's':
+			  	  					  if (frequency > 0.1)
+			  	  					  {
+			  	  					  	frequency -= 0.1;
+			  	  		//			  	sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  		//			  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  else
+			  	  					  {
+			  	  						  sprintf(TxDataBuffer,"Frequency is limited\r\n");
+			  	  					  	  HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  STATE_Display = StateDisplay_MenuSinewave;
+			  	  					  break;
+
+			  	  				case 'd':
+			  	  					if (V_high < 3.3)
+			  	  					{
+			  	  						V_high += 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  						V_high = 3.3;
+			  	  					  	sprintf(TxDataBuffer,"V_high is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  			  //		 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+				  	  		  //		 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						 STATE_Display = StateDisplay_MenuSinewave;
+			  	  					     break;
+
+			  	  				case 'f':
+			  	  					if (V_high > V_low)
+			  	  					{
+			  	  						V_high -= 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_high is limited\r\n");
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+//			  	  		  				 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+//			  	  		  				 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						 STATE_Display = StateDisplay_MenuSinewave;
+			  	  						 break;
+
+			  	  				case 'g':
+			  	  					if (V_low <V_high)
+			  	  					{
+			  	  						V_low += 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_low is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  				//		 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  				//		 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						 STATE_Display = StateDisplay_MenuSinewave;
+			  	  						 break;
+
+			  	  				case 'h':
+			  	  						if (V_low>0)
+			  	  						{
+			  	  							V_low -= 0.1;
+			  	  						}
+			  	  						else
+			  	  						{
+			  	  						  	sprintf(TxDataBuffer,"V_low is limited\r\n");
+			  	  						  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						}
+			  	  			//			 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  			//			 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						 STATE_Display = StateDisplay_MenuSinewave;
+			  	  						  break;
+
+			  	  				case 'x':
+			  	  				  		{
+			  	  				  		  char temp4[]="\n"
+			  	  				  		  		  		"************\r\n"
+			  	  				  		  				"   Menu   \r\n"
+			  	  				  		  				"************\r\n"
+			  	  				  				  	  	"Menu 0: Sawtooth\r\n"
+			  	  				  						"Menu 1: Sine wave\r\n"
+			  	  				  						"Menu 2: Square wave\r\n"
+			  	  				  						"************\r\n"
+			  	  				  		  				"\n";
+			  	  				  		  HAL_UART_Transmit(&huart2, (uint8_t*) temp4, strlen(temp4), 1000);
+			  	  				  		}
+			  	  				  		STATE_Display = StateDisplay_MenuRoot_WaitInput;
+			  	  				  		break;
+			  	  				default:
+			  	  					 sprintf(TxDataBuffer,"unidentified input\r\n");
+			  	  					 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					 STATE_Display = StateDisplay_MenuSinewave;
+			  	  					 break;
+
+			  	  			}
+			  	  			 break;
+
+			  	  		  case StateDisplay_MenuSquarewave:
+			  	  			switch (inputchar)
+			  	  			{
+			  	  				case 'a':
+			  	  					if(frequency < 10)
+			  	  					{
+			  	  						frequency += 0.1;
+						//			 	sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	   		//			  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					 }
+			  	  					else
+			  	  					{
+			  	  						sprintf(TxDataBuffer,"Frequency is limited\r\n");
+			  	  					 	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  					STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					break;
+
+			  	  				case 's':
+			  	  					 if (frequency > 0.1)
+			  	  					  {
+			  	  					  	  frequency -= 0.1;
+			  	  		//			  	sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  		//			  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  else
+			  	  					  {
+			  	  					  	  	sprintf(TxDataBuffer,"Frequency is limited\r\n");
+			  	  					  	  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  }
+			  	  					  	  	STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					  	  	break;
+
+			  	  				case 'd':
+			  	  					if (V_high<3.3)
+			  	  						{
+			  	  							V_high += 0.1;
+			  	  						}
+			  	  					else
+			  	  					{
+			  	  						V_high = 3.3;
+			  	  					  	sprintf(TxDataBuffer,"V_high is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  				//		 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  				//		 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  	 STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					  	 break;
+
+			  	  				case 'f':
+			  	  					if (V_high > V_low)
+			  	  					{
+			  	  						V_high -= 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_high is limited\r\n");
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  		//			  sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  		//			  HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  	STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					   break;
+
+			  	  				case 'g':
+			  	  					if (V_low <V_high)
+			  	  					{
+			  	  						V_low += 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_low is limited\r\n");
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  				//		 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  				//		 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  	 STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					  	 break;
+
+			  	  				case 'h':
+			  	  					if (V_low>0)
+			  	  					{
+			  	  						V_low -= 0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  					  	sprintf(TxDataBuffer,"V_low is limited\r\n");
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  				//			 sprintf(TxDataBuffer,"Frequency is %f Hz\r\n",frequency);
+			  	  				//			 HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					  	 STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					  	 break;
+
+			  	  				case 'w':
+			  	  					if (duty_cycle<1)
+			  	  					{
+			  	  						duty_cycle +=0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  						sprintf(TxDataBuffer,"Duty Cycle is limited\r\n");
+			  	  					 	HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+			  	  					  	STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					  	break;
+
+			  	  				case 'e':
+			  	  					if (duty_cycle>=0.1)
+			  	  					{
+			  	  						duty_cycle -=0.1;
+			  	  					}
+			  	  					else
+			  	  					{
+			  	  						sprintf(TxDataBuffer,"Duty Cycle is limited\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  					}
+
+			  	  					  	 STATE_Display = StateDisplay_MenuSquarewave;
+			  	  					  	 break;
+
+			  	  				case 'x':
+			  	  					  	  {
+			  	  					  	  	char temp4[]="\n"
+			  	  					  	  				"************\r\n"
+			  	  					  	  				"   Menu   \r\n"
+			  	  					  	  				"************\r\n"
+			  	  					  	  				"Menu 0: Sawtooth\r\n"
+			  	  					  	  				"Menu 1: Sine wave\r\n"
+			  	  					  	  				"Menu 2: Square wave\r\n"
+			  	  					  	  				"************\r\n"
+			  	  					  	  				"\n";
+			  	  					  	HAL_UART_Transmit(&huart2, (uint8_t*) temp4, strlen(temp4), 1000);
+			  	  					  	}
+			  	  					  	STATE_Display = StateDisplay_MenuRoot_WaitInput;
+			  	  					  	break;
+
+			  	  				default:
+			  	  						sprintf(TxDataBuffer,"unidentified input\r\n");
+			  	  						HAL_UART_Transmit(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer), 1000);
+			  	  						STATE_Display = StateDisplay_MenuSquarewave;
+			  	  						break;
+			  	  			}
+			  	  			  break;
+			  		}
+			  }
+
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -229,7 +832,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 1;
   hadc1.Init.DMAContinuousRequests = ENABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -272,7 +875,7 @@ static void MX_SPI3_Init(void)
   hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi3.Init.NSS = SPI_NSS_SOFT;
-  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -306,7 +909,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 100;
+  htim3.Init.Prescaler = 99;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 100;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -348,7 +951,7 @@ static void MX_TIM11_Init(void)
 
   /* USER CODE END TIM11_Init 1 */
   htim11.Instance = TIM11;
-  htim11.Init.Prescaler = 100;
+  htim11.Init.Prescaler = 99;
   htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim11.Init.Period = 65535;
   htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -472,23 +1075,23 @@ static void MX_GPIO_Init(void)
 //12 bit = upper and lowwer
 void MCP4922SetOutput(uint8_t Config, uint16_t DACOutput)
 {
-	//กรองข้อมูล //uint_t 16 or 32 ก็ได้
+	//�?รองข้อมูล //uint_t 16 or 32 �?็ได้
 	uint32_t OutputPacket = (DACOutput & 0x0fff) | ((Config & 0xf) << 12); //4 bit upper shift 12 //0011000000000000
 	//output = packet output 16 bits
 
 	//cs = ss slave select
 	HAL_GPIO_WritePin(SPI_SS_GPIO_Port, SPI_SS_Pin, GPIO_PIN_RESET);
-	//communicateafter ss is low
-	HAL_SPI_Transmit_IT(&hspi3, &OutputPacket, 1); //1 packgage
+	//communicate after ss is low
+	HAL_SPI_Transmit_IT(&hspi3, (uint8_t*) &OutputPacket, 1); //1 packgage
 }
 
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-	//interrupt หลังจาก transfer complete
+	//interrupt หลังจา�? transfer complete
 	if (hspi == &hspi3)
 	{
-		//ขากลับมาให้เป็น highทุกครั้งที่จบ packgage
-		//เผื่อให้คุยกับตัวอื่นได้
+		//ขา�?ลับมาให้เป็น highทุ�?ครั้งที่จบ packgage
+		//เผื่อให้คุย�?ับตัวอื่นได้
 		HAL_GPIO_WritePin(SPI_SS_GPIO_Port, SPI_SS_Pin, GPIO_PIN_SET);
 	}
 }
@@ -504,6 +1107,34 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 inline uint64_t micros()
 {
 	return htim11.Instance->CNT + _micro;
+}
+
+int16_t UARTRecieveIT()
+{
+	//store data last position
+	static uint32_t dataPos =0;
+	//create dummy data
+	int16_t data=-1;
+	//check pos in buffer vs last position
+	//32 size - จำนวนที่เหลือ = ตำ�?หน่งปัจจุบัน
+	//มี�?ารพิมพ์ตำ�?หน่งจะไม่เท่า�?ัน
+	if(huart2.RxXferSize - huart2.RxXferCount!=dataPos)
+	{
+		//read data from buffer
+		data=RxDataBuffer[dataPos];
+
+		//move to next pos //ตำ�?หน่งข้อมูลล่าสุดที่อ่าน
+		dataPos= (dataPos+1)%huart2.RxXferSize;
+	}
+	return data;
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	//if(huart == huartxx) ถ้ามีหลายตัว
+	sprintf(TxDataBuffer, "Received:[%s]\r\n", RxDataBuffer);
+	HAL_UART_Transmit_IT(&huart2, (uint8_t*)TxDataBuffer, strlen(TxDataBuffer));
+	//HAL_UART_Transmit_IT ถ้าข้อมูลส่งเร็วไปข้อมูล�?ร�?ยังทำงานไม่เสร็จ ข้อมูลต่อมาจะขาดหาย โค้ดบัค
 }
 /* USER CODE END 4 */
 
